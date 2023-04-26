@@ -132,7 +132,7 @@ class DeprecatedListTask extends BuildTask
 
     public function listDeprecated(string $dir)
     {
-        $paths = explode("\n", shell_exec("find $dir | grep .php"));
+        $paths = explode("\n", shell_exec("find $dir | grep .php") ?? '');
         $paths = array_filter($paths, fn($f) => strtolower(pathinfo($f, PATHINFO_EXTENSION)) == 'php');
         foreach ($paths as $path) {
             if (is_dir($path)) {
