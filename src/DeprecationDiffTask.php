@@ -2,7 +2,6 @@
 
 namespace emteknetnz\Deprecator;
 
-use phpDocumentor\Reflection\Types\Intersection;
 use PhpParser\Error;
 use PhpParser\Lexer;
 use PhpParser\Node\IntersectionType;
@@ -70,6 +69,7 @@ class DeprecationDiffTask extends BuildTask
 
     public function run($request)
     {
+        echo '<pre>';
         if (file_exists(BASE_PATH . "/_output")) {
             foreach (scandir(BASE_PATH . "/_output") as $txt) {
                 if ($txt == '.' || $txt == '..') {
@@ -81,16 +81,31 @@ class DeprecationDiffTask extends BuildTask
             mkdir(BASE_PATH . "/_output");
         }
         file_put_contents(BASE_PATH . "/_output/_log.txt", '');
-        $vendorDirs = [
-            // BASE_PATH . '/vendor/bringyourownideas',
-            // BASE_PATH . '/vendor/colymba',
-            BASE_PATH . '/vendor/cwp',
-            BASE_PATH . '/vendor/dnadesign',
-            BASE_PATH . '/vendor/silverstripe',
-            BASE_PATH . '/vendor/symbiote',
-            // BASE_PATH . '/vendor/tractorcow',
+        $vendors = [
+            'bringyourownideas',
+            'colymba',
+            'cwp',
+            'dnadesign',
+            'silverstripe',
+            'symbiote',
+            'tractorcow',
         ];
-        foreach ($vendorDirs as $vendorDir) {
+        $ignoreModules = [
+            'bringyourownideas/silverstripe-composer-security-checker',
+            'cwp/cwp-pdfexport',
+            'dnadesign/silverstripe-elemental-subsites',
+            'silverstripe/akismet',
+            'silverstripe/event-dispatcher',
+            'silverstripe/frameworktest',
+            'silverstripe/graphql-devtools',
+            'silverstripe/html5',
+            'silverstripe/security-extensions',
+            'silverstripe/spellcheck',
+            'tractorcow/classproxy',
+            'tractorcow/silverstripe-proxy-db',
+        ];
+        foreach ($vendors as $vendor) {
+            $vendorDir = BASE_PATH . '/vendor/' . $vendor;
             if (!file_exists($vendorDir)) {
                 continue;
             }
@@ -99,9 +114,17 @@ class DeprecationDiffTask extends BuildTask
                     continue;
                 }
                 $dir = "$vendorDir/$subdir";
-                if ($dir != '/var/www/vendor/dnadesign/silverstripe-elemental') {
-                    //continue;
+                $moduleName = "$vendor/$subdir";
+
+                if (in_array($moduleName, $ignoreModules)) {
+                    echo "Skipping $moduleName\n";
+                    continue;
                 }
+
+                // if ($moduleName != 'silverstripe/cms') {
+                //     continue;
+                // }
+
                 foreach ([
                     'src',
                     'code',
@@ -129,6 +152,8 @@ class DeprecationDiffTask extends BuildTask
         $s = ob_get_clean();
         file_put_contents($f, $s);
         echo "Wrote to $f\n\n";
+
+        echo '</pre>';
     }
 
     public function output(string $dir)
@@ -158,6 +183,7 @@ class DeprecationDiffTask extends BuildTask
                     'path' => $path,
                     'type' => $f['cms4']['type'],
                     'name' => $f['cms4']['namespace'] . '\\' . $f['cms4']['name'],
+                    'message' => $f['cms4']['deprecation_message'] ?? '',
                 ];
             }
             if ($f['cms4']['deprecated']) {
@@ -203,7 +229,8 @@ class DeprecationDiffTask extends BuildTask
                             'type' => $type,
                             'name' => $name,
                             'class' => $f['cms4']['namespace'] . '\\' . $f['cms4']['name'],
-                            'path' => $path
+                            'path' => $path,
+                            'message' => $f['cms4'][$k][$name]['deprecation_message'] ?? '',
                         ];
                     }
                 }
@@ -333,7 +360,7 @@ class DeprecationDiffTask extends BuildTask
                     // lowercase file name e.g. consts.php
                     continue;
                 }
-                $depr[] = "- Removed deprecated {$a['type']} `{$a['name']}`";
+                $depr[] = "- Removed deprecated {$a['type']} `{$a['name']}` {$a['message']}";
             }
         }
         foreach ($removedInCms5 as $key => $a) {
@@ -351,7 +378,7 @@ class DeprecationDiffTask extends BuildTask
                 } elseif ($this->isFrameworkSapphireTestMethods($key)) {
                     $depr[] = "- Method {$this->getChangelogThing($a, $type)} is now defined in `PHPUnit\Framework\Assert` with a different method signature";
                 } else {
-                    $depr[] = "- Removed deprecated $type {$this->getChangelogThing($a, $type)}";
+                    $depr[] = "- Removed deprecated $type {$this->getChangelogThing($a, $type)} {$a['message']}";
                 }
             }
         }
@@ -565,6 +592,10 @@ class DeprecationDiffTask extends BuildTask
         }
         $cms4Branch = $branches[1];
         $cms5Branch = $branches[0];
+        if (!str_ends_with($cms5Branch, '.0')) {
+            $cms5Branch .= '.0';
+        }
+
         foreach ([$cms5Branch, $cms4Branch] as $branch) {
             if (!file_exists($dir)) {
                 $this->log("WARNING: dir does not exist $dir");
@@ -613,6 +644,10 @@ class DeprecationDiffTask extends BuildTask
                 $this->extract($code, $this->fileinfo[$path][$cms]);
             }
         }
+
+        if ($dir === BASE_PATH . '/vendor/tractorcow/silverstripe-fluent') {
+            shell_exec("cd $dir && git checkout 4");
+        }
     }
 
     private function extract(string $code, &$finfo): string
@@ -635,26 +670,31 @@ class DeprecationDiffTask extends BuildTask
             $finfo['type'] = $class instanceof Class_ ? 'class' : ($class instanceof Trait_ ? 'trait' : 'interface');
             $finfo['name'] = $class->name->name;
             $finfo['deprecated'] = $this->docBlockContainsDeprecated($class);
+            $finfo['deprecation_message'] = $this->deprecationMessageFromDocblock($class);
             foreach ($this->getMethods($class) as $method) {
                 $finfo['methods'][$method->name->name] = [
                     'deprecated' => $this->docBlockContainsDeprecated($method),
+                    'deprecation_message' => $this->deprecationMessageFromDocblock($method),
                     'params' => $this->getParamsData($imports, $ns, $method), // ['name' => $name, 'type' => $type]
                     'returnType' => $this->getReturnType($imports, $ns, $method)
                 ];
             }
             foreach ($this->getConfigs($class) as $config) {
                 $finfo['config'][$config->props[0]->name->name] = [
-                    'deprecated' => $this->docBlockContainsDeprecated($config)
+                    'deprecated' => $this->docBlockContainsDeprecated($config),
+                    'deprecation_message' => $this->deprecationMessageFromDocblock($config),
                 ];
             }
             foreach ($this->getProperties($class) as $property) {
                 $finfo['properties'][$property->props[0]->name->name] = [
-                    'deprecated' => $this->docBlockContainsDeprecated($property)
+                    'deprecated' => $this->docBlockContainsDeprecated($property),
+                    'deprecation_message' => $this->deprecationMessageFromDocblock($property),
                 ];
             }
             foreach ($this->getConstants($class) as $constant) {
                 $finfo['constants'][$constant->consts[0]->name->name] = [
-                    'deprecated' => $this->docBlockContainsDeprecated($constant)
+                    'deprecated' => $this->docBlockContainsDeprecated($constant),
+                    'deprecation_message' => $this->deprecationMessageFromDocblock($constant),
                 ];
             }
         }
@@ -729,6 +769,33 @@ class DeprecationDiffTask extends BuildTask
             $docblock = $docComment->getText();
         }
         return strpos($docblock, '* @deprecated') !== false;
+    }
+
+    private function deprecationMessageFromDocblock($node): string
+    {
+        $docComment = $node->getDocComment();
+        $docblock = '';
+        if ($docComment !== null) {
+            $docblock = $docComment->getText();
+        }
+
+        preg_match('/\* @deprecated(?> \d+\.\d+(?>\.\d+))?\h*(.*)(\n|$)/', $docblock, $matches);
+
+        $message = lcfirst(trim($matches[1] ?? ''));
+
+        if ($message !== '') {
+            $message = "- $message";
+        }
+
+        $message = preg_replace('/^- will be renamed ([^\\\\]*\\\\.*)/', '- renamed [`$1`](api:$1)', $message);
+        $message = preg_replace('/^- will be renamed/', '- renamed', $message);
+        $message = preg_replace('/^- will be replaced with ([^\\\\]*\\\\.*)/', '- replaced with [`$1`](api:$1)', $message);
+        $message = preg_replace('/^- will be replaced with/', '- replaced with', $message);
+        $message = preg_replace('/^- use ([^\\\\]*\\\\.*) instead/', '- use [`$1`](api:$1) instead', $message);
+        $message = preg_replace('/^- use ([^\\\\]*) instead/', '- use `$1` instead', $message);
+        $message = preg_replace('/^- will be removed/', '', $message);
+
+        return trim($message);
     }
 
     private function cTest()
